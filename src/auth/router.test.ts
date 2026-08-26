@@ -183,6 +183,97 @@ describe("OAuth router", () => {
     });
   });
 
+  /**
+   * RFC 6749 §5.1 / RFC 7591 §3.2.1. A token or `client_secret` that an
+   * intermediary is allowed to retain is a credential leak, so these headers
+   * are asserted on both endpoints and on both outcomes.
+   */
+  describe("credential responses are not storable", () => {
+    const expectNoStore = (response: Response) => {
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("pragma")).toBe("no-cache");
+    };
+
+    it("marks a registration response carrying client_secret", async () => {
+      const app = createOAuthRouter({ proxy: makeProxy() });
+
+      const response = await post(app, "/oauth/register", {
+        body: JSON.stringify({
+          redirect_uris: ["https://client.example.com/callback"],
+          token_endpoint_auth_method: "client_secret_basic",
+        }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+
+      expect(response.status).toBe(201);
+      expect(
+        ((await response.json()) as Record<string, unknown>).client_secret,
+      ).toEqual(expect.any(String));
+      expectNoStore(response);
+    });
+
+    it("marks a token response", async () => {
+      const proxy = makeProxy();
+      const spy = vi
+        .spyOn(proxy, "exchangeAuthorizationCode")
+        .mockResolvedValue({
+          access_token: "t",
+          refresh_token: "r",
+          token_type: "Bearer",
+        } as never);
+      const app = createOAuthRouter({ proxy });
+
+      const response = await post(app, "/oauth/token", {
+        body: new URLSearchParams({
+          code: "abc",
+          grant_type: "authorization_code",
+        }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+
+      expect(response.status).toBe(200);
+      expectNoStore(response);
+      spy.mockRestore();
+    });
+
+    it("marks the error paths of both endpoints too", async () => {
+      const app = createOAuthRouter({ proxy: makeProxy() });
+
+      // Registration error: no redirect_uris.
+      expectNoStore(
+        await post(app, "/oauth/register", {
+          body: JSON.stringify({}),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        }),
+      );
+
+      // Token error: an authorization code that was never issued.
+      expectNoStore(
+        await post(app, "/oauth/token", {
+          body: new URLSearchParams({
+            client_id: "nobody",
+            code: "never-issued",
+            grant_type: "authorization_code",
+          }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        }),
+      );
+
+      // Over the body cap, rejected before either handler runs.
+      expectNoStore(
+        await post(app, "/oauth/token", {
+          body: "x".repeat(OAUTH_PROXY_MAX_BODY_SIZE + 1),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        }),
+      );
+    });
+  });
+
   describe("discovery metadata", () => {
     it("serves authorization server metadata in snake_case", async () => {
       const proxy = makeProxy();

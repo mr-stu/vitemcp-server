@@ -90,6 +90,22 @@ const tooLarge = {
 };
 
 /**
+ * RFC 6749 §5.1 mandates these on token endpoint responses, and RFC 7591
+ * §3.2.1 on a registration response carrying `client_secret`: without them a
+ * CDN, a forward proxy or the browser is free to retain the credential.
+ *
+ * Applied to every response from those two endpoints, error paths included —
+ * an error is exactly the response an intermediary is most likely to consider
+ * cacheable, and the endpoint should not vary in cacheability by outcome.
+ * `authorize`, `callback` and `consent` are left alone: they redirect, and
+ * carry no credential in the body.
+ */
+const noStore = {
+  "Cache-Control": "no-store",
+  Pragma: "no-cache",
+};
+
+/**
  * RFC 8414 / 9728 metadata is snake_case on the wire; config is camelCase.
  * Top-level keys only — nested values are caller-defined payloads.
  */
@@ -158,14 +174,14 @@ export const createOAuthRouter = (options: OAuthRouterOptions): Hono => {
     const body = await readJsonBody(c.req.raw);
 
     if (body === null) {
-      return c.json(tooLarge, 400);
+      return c.json(tooLarge, 400, noStore);
     }
 
     try {
-      return c.json(await proxy.registerClient(body as never), 201);
+      return c.json(await proxy.registerClient(body as never), 201, noStore);
     } catch (error) {
       const { body: errBody, status } = errorResponse(error);
-      return c.json(errBody as never, status);
+      return c.json(errBody as never, status, noStore);
     }
   });
 
@@ -186,7 +202,7 @@ export const createOAuthRouter = (options: OAuthRouterOptions): Hono => {
     const text = await readCappedBody(raw);
 
     if (text === null) {
-      return c.json(tooLarge, 400);
+      return c.json(tooLarge, 400, noStore);
     }
 
     try {
@@ -214,10 +230,10 @@ export const createOAuthRouter = (options: OAuthRouterOptions): Hono => {
           ? await proxy.exchangeRefreshToken(params as never)
           : await proxy.exchangeAuthorizationCode(params as never);
 
-      return c.json(result as never);
+      return c.json(result as never, 200, noStore);
     } catch (error) {
       const { body, status } = errorResponse(error);
-      return c.json(body as never, status);
+      return c.json(body as never, status, noStore);
     }
   });
 
