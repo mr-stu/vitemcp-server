@@ -168,7 +168,15 @@ export class DiskStore implements TokenStorage {
     };
 
     try {
-      await writeFile(filePath, JSON.stringify(entry, null, 2), "utf-8");
+      // 0o600: entries hold authorization codes, access and refresh tokens and
+      // PKCE verifiers, so nothing outside the owning user should read them.
+      // Node only applies `mode` when it creates the file — overwriting one
+      // that predates this keeps the mode it already had, so a directory
+      // carried over from an earlier version needs a one-time chmod.
+      await writeFile(filePath, JSON.stringify(entry, null, 2), {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
     } catch (error) {
       console.error(`Failed to save key ${key}:`, error);
       throw error;
@@ -236,7 +244,12 @@ export class DiskStore implements TokenStorage {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        await mkdir(this.directory, { recursive: true });
+        // 0o700, because the filenames leak on their own: getFilePath() derives
+        // them from the storage key, and a client code is stored under
+        // `code:<the authorization code>`. A listable directory is enough to
+        // harvest them, no read permission required. Applies only to a
+        // directory this call creates; an existing one is left as configured.
+        await mkdir(this.directory, { mode: 0o700, recursive: true });
       } else {
         throw error;
       }

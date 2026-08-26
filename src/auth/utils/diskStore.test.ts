@@ -1,4 +1,4 @@
-import { readdir, rm } from "fs/promises";
+import { readdir, rm, stat } from "fs/promises";
 import { join } from "path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -245,6 +245,32 @@ describe("DiskStore", () => {
 
       const files = await readdir(TEST_DIR);
       expect(files.filter((file) => file.includes(".claim"))).toHaveLength(0);
+
+      store.destroy();
+    });
+  });
+
+  // Windows has no POSIX mode bits, so `mode` is ignored there.
+  describe.skipIf(process.platform === "win32")("file permissions", () => {
+    it("should keep stored credentials unreadable by group and other", async () => {
+      const store = new DiskStore({ directory: TEST_DIR });
+
+      // The key becomes the filename, so a listable directory leaks the
+      // authorization code even to someone who cannot read the file.
+      await store.save("code:an-authorization-code", {
+        accessToken: "AT",
+        refreshToken: "RT",
+      });
+
+      const [directoryMode, fileMode] = await Promise.all([
+        stat(TEST_DIR).then((stats) => stats.mode),
+        stat(join(TEST_DIR, "code_an-authorization-code.json")).then(
+          (stats) => stats.mode,
+        ),
+      ]);
+
+      expect(directoryMode & 0o077).toBe(0);
+      expect(fileMode & 0o077).toBe(0);
 
       store.destroy();
     });
