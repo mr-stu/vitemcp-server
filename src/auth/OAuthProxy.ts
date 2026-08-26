@@ -1366,13 +1366,36 @@ export class OAuthProxy {
   }
 
   /**
-   * Match URI against pattern (supports wildcards)
+   * Match a URI against an allow-list glob: `*` spans any run of characters,
+   * `?` exactly one, and everything else is literal.
+   *
+   * "Everything else is literal" is the security-relevant half. Left unescaped,
+   * a `.` reaches the RegExp as "any character", so the pattern an operator
+   * wrote for one host — `https://client.example.com/*` — also admits
+   * `https://clientXexampleYcom/steal`, a name an attacker can register. DCR
+   * would accept it and `handleCallback()` would later 302 a fresh
+   * authorization code to it, reopening the CWE-601 path this allow-list
+   * exists to close. `+ ^ $ ( ) [ ] { } |` widen a pattern the same way.
+   *
+   * Escaping and wildcard expansion happen in one pass, so a backslash this
+   * inserts can never be re-read as the metacharacter of a later pass.
    */
   private matchesPattern(uri: string, pattern: string): boolean {
-    const regex = new RegExp(
-      "^" + pattern.replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
-    );
-    return regex.test(uri);
+    // The canonical escape set (as in MDN's `escapeRegExp`), with `*` and `?`
+    // diverted to their glob meanings instead of being escaped.
+    const source = pattern.replace(/[.*+?^${}()|[\]\\]/g, (character) => {
+      if (character === "*") {
+        return ".*";
+      }
+
+      if (character === "?") {
+        return ".";
+      }
+
+      return `\\${character}`;
+    });
+
+    return new RegExp(`^${source}$`).test(uri);
   }
 
   /**

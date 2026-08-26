@@ -450,4 +450,83 @@ describe("OAuthProxy CWE-601 open-redirect regression", () => {
       loose.destroy();
     });
   });
+
+  /**
+   * A pattern is a glob, not a regex. Compiling one into a RegExp without
+   * escaping made every metacharacter in it live, which widens the allow-list
+   * past the single host the operator wrote and hands DCR back to an attacker.
+   * Asserted through registerClient(), since that is the reachable path.
+   */
+  describe("validateRedirectUri() treats patterns as globs, not regexes", () => {
+    const register = async (pattern: string, uri: string) => {
+      const scoped = new OAuthProxy({
+        ...baseConfig,
+        allowedRedirectUriPatterns: [pattern],
+      });
+
+      try {
+        return await scoped.registerClient({ redirect_uris: [uri] });
+      } finally {
+        scoped.destroy();
+      }
+    };
+
+    it("does not let a `.` in the pattern match an arbitrary character", async () => {
+      // The operator wrote one host; a lookalike an attacker can register
+      // must not satisfy it.
+      await expect(
+        register(
+          "https://client.example.com/*",
+          "https://clientXexampleYcom/steal",
+        ),
+      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+    });
+
+    it("does not treat a `+` in the pattern as a quantifier", async () => {
+      // Only the `+` differs here: as a quantifier it would let one `a` in the
+      // pattern stand for the run of them in the host.
+      await expect(
+        register("https://a+b.example.com/cb", "https://aaab.example.com/cb"),
+      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+    });
+
+    it("does not let a `|` in the pattern become an alternation", async () => {
+      // Unescaped, `|` splits the whole expression at the top level, so the
+      // right-hand branch alone satisfies the allow-list.
+      await expect(
+        register(
+          "https://client.example.com/cb|https://evil.attacker.com",
+          "https://evil.attacker.com",
+        ),
+      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+    });
+
+    it("matches a literal metacharacter that is really in the URI", async () => {
+      // Narrowing must not break patterns that were already correct: an
+      // escaped character has to match itself. As a quantifier `a+` would
+      // never match the literal `a+` below.
+      await expect(
+        register(
+          "https://client.example.com/a+b",
+          "https://client.example.com/a+b",
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    it("keeps `*` and `?` working as wildcards", async () => {
+      await expect(
+        register(
+          "https://client.example.com/*",
+          "https://client.example.com/deep/callback",
+        ),
+      ).resolves.toBeDefined();
+
+      await expect(
+        register(
+          "https://client.example.com/cb?",
+          "https://client.example.com/cbX",
+        ),
+      ).resolves.toBeDefined();
+    });
+  });
 });
