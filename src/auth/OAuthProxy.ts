@@ -1366,36 +1366,64 @@ export class OAuthProxy {
   }
 
   /**
-   * Match a URI against an allow-list glob: `*` spans any run of characters,
-   * `?` exactly one, and everything else is literal.
+   * Match a parsed URI against an allow-list pattern, one URI component at a
+   * time: scheme, host, port, then everything from the path onwards. A `*`
+   * therefore stops where its component stops.
    *
-   * "Everything else is literal" is the security-relevant half. Left unescaped,
-   * a `.` reaches the RegExp as "any character", so the pattern an operator
-   * wrote for one host — `https://client.example.com/*` — also admits
-   * `https://clientXexampleYcom/steal`, a name an attacker can register. DCR
-   * would accept it and `handleCallback()` would later 302 a fresh
-   * authorization code to it, reopening the CWE-601 path this allow-list
-   * exists to close. `+ ^ $ ( ) [ ] { } |` widen a pattern the same way.
+   * That containment is the whole point. Matching the pattern against the raw
+   * string let a wildcard run straight through the delimiters that decide
+   * where the browser actually navigates:
    *
-   * Escaping and wildcard expansion happen in one pass, so a backslash this
-   * inserts can never be re-read as the metacharacter of a later pass.
+   *   - `http://localhost:*` matched `http://localhost:@evil.com/cb`, where
+   *     `localhost:` is userinfo and the real host is `evil.com`.
+   *   - `https://*.example.com/*` matched
+   *     `https://evil.com/a.example.com/cb`, because the wildcard covered
+   *     `evil.com/a` — authority and path at once.
+   *
+   * Both register cleanly under the old matcher, and `handleCallback()` would
+   * then 302 a fresh authorization code to the attacker's host: the CWE-601
+   * theft path this allow-list exists to close. Comparing against `URL`'s
+   * parse makes the delimiters structural rather than incidental, so no
+   * pattern can span them however it is written.
+   *
+   * A pattern that omits the path (`http://localhost:*`, the loopback default)
+   * constrains scheme, host and port only — an ephemeral client chooses its
+   * own callback path. Write a path to pin one.
    */
-  private matchesPattern(uri: string, pattern: string): boolean {
-    // The canonical escape set (as in MDN's `escapeRegExp`), with `*` and `?`
-    // diverted to their glob meanings instead of being escaped.
-    const source = pattern.replace(/[.*+?^${}()|[\]\\]/g, (character) => {
-      if (character === "*") {
-        return ".*";
+  private matchesPattern(uri: URL, pattern: string): boolean {
+    const parsed = parseUriPattern(pattern);
+
+    if (!parsed) {
+      return false;
+    }
+
+    // `URL` lower-cases both, so the comparisons below are case-insensitive
+    // exactly where the URI syntax says they should be.
+    if (uri.protocol.slice(0, -1) !== parsed.scheme) {
+      return false;
+    }
+
+    if (parsed.authority) {
+      if (!globComponent(parsed.authority.host).test(uri.hostname)) {
+        return false;
       }
 
-      if (character === "?") {
-        return ".";
+      // `port` is "" for a scheme's default port, so `*` covers both.
+      if (!globComponent(parsed.authority.port).test(uri.port)) {
+        return false;
       }
+    } else if (uri.host !== "") {
+      // Pattern is `scheme:path` with no authority; the URI has one.
+      return false;
+    }
 
-      return `\\${character}`;
-    });
+    if (parsed.rest === "") {
+      return true;
+    }
 
-    return new RegExp(`^${source}$`).test(uri);
+    return globComponent(parsed.rest).test(
+      `${uri.pathname}${uri.search}${uri.hash}`,
+    );
   }
 
   /**
@@ -1699,9 +1727,19 @@ export class OAuthProxy {
    * theft. Do not loosen the default beyond loopback addresses.
    */
   private validateRedirectUri(uri: string): boolean {
+    let url: URL;
+
     try {
-      new URL(uri); // syntactic check only — throws on malformed input
+      url = new URL(uri); // throws on malformed input
     } catch {
+      return false;
+    }
+
+    // Userinfo has no legitimate use in a redirect URI, and every use of it is
+    // an attempt to make one host read as another: `http://localhost:@evil.com`
+    // navigates to evil.com. Refuse it outright rather than rely on each
+    // pattern to be written defensively.
+    if (url.username !== "" || url.password !== "") {
       return false;
     }
 
@@ -1719,10 +1757,102 @@ export class OAuthProxy {
     ];
 
     return effectivePatterns.some((pattern) =>
-      this.matchesPattern(uri, pattern),
+      this.matchesPattern(url, pattern),
     );
   }
 }
+
+/**
+ * One component of an allow-list pattern, compiled to an anchored RegExp where
+ * `*` spans any run of characters and `?` exactly one.
+ *
+ * Every other character is escaped, using the canonical set from MDN's
+ * `escapeRegExp`. Left raw, a `.` would reach the RegExp as "any character", so
+ * a pattern written for one host would also admit a lookalike an attacker can
+ * register. Escaping and wildcard expansion happen in one pass, so a backslash
+ * this inserts can never be re-read as the metacharacter of a later pass.
+ */
+const globComponent = (glob: string): RegExp => {
+  const source = glob.replace(/[.*+?^${}()|[\]\\]/g, (character) => {
+    if (character === "*") {
+      return ".*";
+    }
+
+    if (character === "?") {
+      return ".";
+    }
+
+    return `\\${character}`;
+  });
+
+  return new RegExp(`^${source}$`);
+};
+
+/**
+ * An allow-list pattern split into the URI components it constrains.
+ *
+ * `authority` is null for a private-use scheme with no `//` (RFC 8252 §7.1,
+ * e.g. `com.example.app:/callback`); `rest` is empty when the pattern
+ * constrains scheme, host and port only.
+ */
+type UriPattern = {
+  authority: { host: string; port: string } | null;
+  rest: string;
+  scheme: string;
+};
+
+/**
+ * Split a pattern into components without `new URL()`, which rejects the
+ * wildcards the patterns exist to express — `http://localhost:*` throws,
+ * because `*` is not a valid port.
+ *
+ * Returns null for a pattern that cannot be honoured safely, which then matches
+ * nothing: a pattern that fails to parse must never fall back to matching more
+ * than it should.
+ */
+const parseUriPattern = (pattern: string): null | UriPattern => {
+  const schemeEnd = pattern.indexOf(":");
+
+  if (schemeEnd <= 0) {
+    return null;
+  }
+
+  const scheme = pattern.slice(0, schemeEnd).toLowerCase();
+  const afterScheme = pattern.slice(schemeEnd + 1);
+
+  if (!afterScheme.startsWith("//")) {
+    return { authority: null, rest: afterScheme, scheme };
+  }
+
+  const hierarchical = afterScheme.slice(2);
+  const restStart = hierarchical.search(/[#/?]/);
+  const authority =
+    restStart === -1 ? hierarchical : hierarchical.slice(0, restStart);
+
+  // Userinfo is never legitimate in a redirect URI, and a pattern carrying it
+  // could only ever be a mistake — reject rather than guess at the intent.
+  if (authority.includes("@")) {
+    return null;
+  }
+
+  // An IPv6 literal is bracketed and full of colons, so the port separator is
+  // the first colon *after* the closing bracket. An unclosed bracket falls back
+  // to 0 and yields a host that matches nothing, which is the safe direction.
+  const hostEnd = authority.startsWith("[") ? authority.indexOf("]") + 1 : 0;
+  const portSeparator = authority.indexOf(":", hostEnd);
+
+  return {
+    authority: {
+      host: (portSeparator === -1
+        ? authority
+        : authority.slice(0, portSeparator)
+      ).toLowerCase(),
+      port: portSeparator === -1 ? "" : authority.slice(portSeparator + 1),
+    },
+    rest: restStart === -1 ? "" : hierarchical.slice(restStart),
+    scheme,
+  };
+};
 
 /**
  * OAuth Proxy Error

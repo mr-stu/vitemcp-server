@@ -419,6 +419,25 @@ const authProxy = new OAuthProxy({
 });
 ```
 
+A pattern is matched one URI component at a time — scheme, host, port, then
+everything from the path onwards — so a `*` never reaches past the component it
+appears in. `https://*.example.com/*` admits `https://app.example.com/anything`
+but not `https://evil.com/a.example.com/cb`, where the wildcard would otherwise
+have covered `evil.com/a`.
+
+Consequences worth knowing:
+
+- **Omit the path and the pattern constrains the authority only.**
+  `http://localhost:*` allows any port and any path; that is what lets an
+  ephemeral loopback client pick its own callback. Write a path to pin one.
+- **Hosts and schemes compare case-insensitively**, and a default port is
+  normalized: `https://app.example.com/*` matches `https://app.example.com:443/cb`.
+- **A redirect URI carrying userinfo is always rejected**, whatever the
+  patterns say. `http://localhost:@evil.com/cb` navigates to `evil.com`, and no
+  legitimate client sends credentials in a callback URL.
+- Private-use schemes (`com.example.app:/*`) and bracketed IPv6 literals
+  (`http://[::1]:*`) are supported.
+
 ### TTLs
 
 ```typescript

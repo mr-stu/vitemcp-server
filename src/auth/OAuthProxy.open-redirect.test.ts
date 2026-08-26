@@ -77,6 +77,33 @@ const baseConfig = {
 const LEGIT_REDIRECT = "https://client.example.com/callback";
 const EVIL_REDIRECT = "http://evil.attacker.com/steal";
 
+/**
+ * Drives the allow-list through DCR, which is the reachable path to
+ * validateRedirectUri(). `patterns` omitted exercises the loopback default.
+ */
+const register = async (patterns: string[] | undefined, uri: string) => {
+  const scoped = new OAuthProxy({
+    ...baseConfig,
+    // Passing undefined is meaningful: it overrides baseConfig's pattern and
+    // exercises the loopback default.
+    allowedRedirectUriPatterns: patterns,
+  });
+
+  try {
+    return await scoped.registerClient({ redirect_uris: [uri] });
+  } finally {
+    scoped.destroy();
+  }
+};
+
+const expectAllowed = (patterns: string[] | undefined, uri: string) =>
+  expect(register(patterns, uri)).resolves.toBeDefined();
+
+const expectRejected = (patterns: string[] | undefined, uri: string) =>
+  expect(register(patterns, uri)).rejects.toMatchObject({
+    code: "invalid_redirect_uri",
+  });
+
 function buildAuthParams(
   overrides: Partial<AuthorizationParams> = {},
 ): AuthorizationParams {
@@ -458,75 +485,163 @@ describe("OAuthProxy CWE-601 open-redirect regression", () => {
    * Asserted through registerClient(), since that is the reachable path.
    */
   describe("validateRedirectUri() treats patterns as globs, not regexes", () => {
-    const register = async (pattern: string, uri: string) => {
-      const scoped = new OAuthProxy({
-        ...baseConfig,
-        allowedRedirectUriPatterns: [pattern],
-      });
-
-      try {
-        return await scoped.registerClient({ redirect_uris: [uri] });
-      } finally {
-        scoped.destroy();
-      }
-    };
-
     it("does not let a `.` in the pattern match an arbitrary character", async () => {
       // The operator wrote one host; a lookalike an attacker can register
       // must not satisfy it.
-      await expect(
-        register(
-          "https://client.example.com/*",
-          "https://clientXexampleYcom/steal",
-        ),
-      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+      await expectRejected(
+        ["https://client.example.com/*"],
+        "https://clientXexampleYcom/steal",
+      );
     });
 
     it("does not treat a `+` in the pattern as a quantifier", async () => {
       // Only the `+` differs here: as a quantifier it would let one `a` in the
       // pattern stand for the run of them in the host.
-      await expect(
-        register("https://a+b.example.com/cb", "https://aaab.example.com/cb"),
-      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+      await expectRejected(
+        ["https://a+b.example.com/cb"],
+        "https://aaab.example.com/cb",
+      );
     });
 
     it("does not let a `|` in the pattern become an alternation", async () => {
       // Unescaped, `|` splits the whole expression at the top level, so the
       // right-hand branch alone satisfies the allow-list.
-      await expect(
-        register(
-          "https://client.example.com/cb|https://evil.attacker.com",
-          "https://evil.attacker.com",
-        ),
-      ).rejects.toMatchObject({ code: "invalid_redirect_uri" });
+      await expectRejected(
+        ["https://client.example.com/cb|https://evil.attacker.com"],
+        "https://evil.attacker.com",
+      );
     });
 
     it("matches a literal metacharacter that is really in the URI", async () => {
       // Narrowing must not break patterns that were already correct: an
       // escaped character has to match itself. As a quantifier `a+` would
       // never match the literal `a+` below.
-      await expect(
-        register(
-          "https://client.example.com/a+b",
-          "https://client.example.com/a+b",
-        ),
-      ).resolves.toBeDefined();
+      await expectAllowed(
+        ["https://client.example.com/a+b"],
+        "https://client.example.com/a+b",
+      );
     });
 
     it("keeps `*` and `?` working as wildcards", async () => {
-      await expect(
-        register(
-          "https://client.example.com/*",
-          "https://client.example.com/deep/callback",
-        ),
-      ).resolves.toBeDefined();
+      await expectAllowed(
+        ["https://client.example.com/*"],
+        "https://client.example.com/deep/callback",
+      );
 
-      await expect(
-        register(
-          "https://client.example.com/cb?",
-          "https://client.example.com/cbX",
-        ),
-      ).resolves.toBeDefined();
+      await expectAllowed(
+        ["https://client.example.com/cb?"],
+        "https://client.example.com/cbX",
+      );
+    });
+  });
+
+  /**
+   * A pattern used to be matched against the raw URI string, so a wildcard ran
+   * straight through the delimiters that decide where the browser navigates.
+   * Matching component-by-component against URL's parse contains it.
+   */
+  describe("validateRedirectUri() matches per URI component", () => {
+    it("rejects a userinfo host that only reads as the allowed one", async () => {
+      // `localhost:` here is userinfo; the host is evil.com. The old matcher
+      // saw a string starting with "http://localhost:" and allowed it.
+      await expectRejected(undefined, "http://localhost:@evil.com/cb");
+      await expectRejected(
+        ["http://localhost:*"],
+        "http://localhost:@evil.com/cb",
+      );
+    });
+
+    it("rejects userinfo even on a host the pattern does allow", async () => {
+      // Every component here satisfies the pattern — host included — so only
+      // the userinfo rule can reject it. Nothing legitimate puts credentials
+      // in a redirect URI.
+      await expectRejected(
+        ["https://*.example.com/*"],
+        "https://user:pw@app.example.com/cb",
+      );
+    });
+
+    it("does not let a host wildcard reach into the path", async () => {
+      // `*` in `https://*.example.com/*` used to cover "evil.com/a", spanning
+      // authority and path at once.
+      await expectRejected(
+        ["https://*.example.com/*"],
+        "https://evil.com/a.example.com/cb",
+      );
+
+      await expectRejected(
+        ["https://*.example.com/*"],
+        "https://evil.com:8443/x.example.com/cb",
+      );
+    });
+
+    it("pins the scheme and the port", async () => {
+      await expectRejected(
+        ["https://app.example.com/*"],
+        "http://app.example.com/cb",
+      );
+
+      await expectRejected(
+        ["https://app.example.com:8443/*"],
+        "https://app.example.com:9999/cb",
+      );
+    });
+
+    it("refuses an authority the pattern never granted", async () => {
+      // `com.example.app:/*` names no authority, so a URI that carries one
+      // must not satisfy it.
+      await expectRejected(
+        ["com.example.app:/*"],
+        "com.example.app://evil.com/cb",
+      );
+    });
+
+    it("still accepts every documented pattern shape", async () => {
+      // The three forms in docs/oauth.md, plus the loopback default.
+      await expectAllowed(
+        ["https://*.example.com/*"],
+        "https://app.example.com/callback",
+      );
+      await expectAllowed(["http://localhost:*"], "http://localhost:1234/cb");
+      await expectAllowed(
+        ["https://app.example.com/callback"],
+        "https://app.example.com/callback",
+      );
+      await expectAllowed(undefined, "http://127.0.0.1:33418/callback");
+    });
+
+    it("keeps a path-less pattern scoped to scheme, host and port", async () => {
+      // An ephemeral loopback client picks its own callback path, so a pattern
+      // that omits the path constrains the authority only — but only there.
+      await expectAllowed(undefined, "http://localhost:8080/any/path");
+      await expectRejected(
+        ["https://app.example.com/callback"],
+        "https://app.example.com/other",
+      );
+    });
+
+    it("compares hosts case-insensitively and normalizes a default port", async () => {
+      // Both are the same origin, and URL says so; the old string compare did
+      // not.
+      await expectAllowed(
+        ["https://client.example.com/*"],
+        "https://CLIENT.Example.COM/cb",
+      );
+      await expectAllowed(
+        ["https://app.example.com/*"],
+        "https://app.example.com:443/cb",
+      );
+    });
+
+    it("supports private-use schemes and IPv6 literals", async () => {
+      // RFC 8252 §7.1 native-app callbacks, and the bracketed loopback whose
+      // colons must not be read as a port separator.
+      await expectAllowed(
+        ["com.example.app:/*"],
+        "com.example.app:/oauth2redirect",
+      );
+      await expectAllowed(["myapp://callback"], "myapp://callback");
+      await expectAllowed(["http://[::1]:*"], "http://[::1]:9999/cb");
     });
   });
 });
