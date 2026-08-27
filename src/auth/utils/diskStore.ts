@@ -46,6 +46,7 @@ interface StorageEntry {
  * Persists tokens to filesystem for survival across server restarts
  */
 export class DiskStore implements TokenStorage {
+  private cleanupInFlight: null | Promise<void> = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private directory: string;
   private fileExtension: string;
@@ -65,40 +66,20 @@ export class DiskStore implements TokenStorage {
   }
 
   /**
-   * Clean up expired entries
+   * Clean up expired entries.
+   *
+   * A sweep walks the whole directory and reads every entry, so on a large
+   * store it can outlast the cleanup interval. Callers arriving while one is
+   * running — the timer below, the OAuth proxy's own cleanup timer, or a
+   * direct call — join the sweep in flight instead of starting a second walk
+   * over the same files, which would only make a slow sweep slower.
    */
   async cleanup(): Promise<void> {
-    try {
-      await this.ensureDirectory();
-      const files = await readdir(this.directory);
-      const now = Date.now();
+    this.cleanupInFlight ??= this.runCleanup().finally(() => {
+      this.cleanupInFlight = null;
+    });
 
-      for (const file of files) {
-        if (!file.endsWith(this.fileExtension)) {
-          continue;
-        }
-
-        try {
-          const filePath = join(this.directory, file);
-          const content = await readFile(filePath, "utf-8");
-          const entry: StorageEntry = JSON.parse(content);
-
-          if (entry.expiresAt < now) {
-            await rm(filePath);
-          }
-        } catch (error) {
-          // If file is corrupted or can't be read, delete it
-          console.warn(`Failed to read/parse file ${file}, deleting:`, error);
-          try {
-            await rm(join(this.directory, file));
-          } catch {
-            // Ignore deletion errors
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Cleanup failed:", error);
-    }
+    return this.cleanupInFlight;
   }
 
   /**
@@ -263,5 +244,43 @@ export class DiskStore implements TokenStorage {
     // Sanitize key to prevent directory traversal
     const sanitizedKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
     return join(this.directory, `${sanitizedKey}${this.fileExtension}`);
+  }
+
+  /**
+   * One directory sweep. Always call through {@link cleanup}, which keeps
+   * concurrent sweeps from overlapping.
+   */
+  private async runCleanup(): Promise<void> {
+    try {
+      await this.ensureDirectory();
+      const files = await readdir(this.directory);
+      const now = Date.now();
+
+      for (const file of files) {
+        if (!file.endsWith(this.fileExtension)) {
+          continue;
+        }
+
+        try {
+          const filePath = join(this.directory, file);
+          const content = await readFile(filePath, "utf-8");
+          const entry: StorageEntry = JSON.parse(content);
+
+          if (entry.expiresAt < now) {
+            await rm(filePath);
+          }
+        } catch (error) {
+          // If file is corrupted or can't be read, delete it
+          console.warn(`Failed to read/parse file ${file}, deleting:`, error);
+          try {
+            await rm(join(this.directory, file));
+          } catch {
+            // Ignore deletion errors
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Cleanup failed:", error);
+    }
   }
 }

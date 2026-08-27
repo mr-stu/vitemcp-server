@@ -1,8 +1,45 @@
 import { readdir, rm, stat } from "fs/promises";
 import { join } from "path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { DiskStore } from "./diskStore.js";
+
+/**
+ * Counts and optionally parks directory walks so a cleanup sweep can be held
+ * open deterministically. Everything else delegates to the real `fs/promises`,
+ * so the rest of this file is unaffected.
+ */
+const readdirGate = vi.hoisted(() => ({
+  blocked: null as null | Promise<void>,
+  count: 0,
+  onCall: null as (() => void) | null,
+}));
+
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+
+  return {
+    ...actual,
+    readdir: async (...args: Parameters<typeof actual.readdir>) => {
+      readdirGate.count += 1;
+      readdirGate.onCall?.();
+
+      if (readdirGate.blocked) {
+        await readdirGate.blocked;
+      }
+
+      return actual.readdir(...args);
+    },
+  };
+});
 
 const TEST_DIR = join(process.cwd(), ".test-disk-store");
 
@@ -14,6 +51,12 @@ describe("DiskStore", () => {
     } catch {
       // Ignore errors
     }
+  });
+
+  afterEach(() => {
+    readdirGate.blocked = null;
+    readdirGate.count = 0;
+    readdirGate.onCall = null;
   });
 
   afterEach(async () => {
@@ -125,6 +168,40 @@ describe("DiskStore", () => {
 
     const value3 = await store.get("key3");
     expect(value3).toBe("value3");
+
+    store.destroy();
+  });
+
+  it("should not start a second sweep while one is in flight", async () => {
+    const store = new DiskStore({ directory: TEST_DIR });
+    await store.save("key1", "value1", 3600);
+
+    let release!: () => void;
+    const sweepEntered = new Promise<void>((resolve) => {
+      readdirGate.onCall = resolve;
+    });
+    readdirGate.blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    readdirGate.count = 0;
+
+    const first = store.cleanup();
+    const second = store.cleanup();
+
+    // The first sweep is now parked inside readdir. The second must have
+    // joined it rather than walking the directory again.
+    await sweepEntered;
+    expect(readdirGate.count).toBe(1);
+
+    release();
+    await Promise.all([first, second]);
+    expect(readdirGate.count).toBe(1);
+
+    // Once the guard clears, a later call sweeps again.
+    readdirGate.blocked = null;
+    readdirGate.onCall = null;
+    await store.cleanup();
+    expect(readdirGate.count).toBe(2);
 
     store.destroy();
   });
