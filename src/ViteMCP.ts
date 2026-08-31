@@ -1695,15 +1695,36 @@ const promptArgsSchema = <T extends ViteMCPAuth>(prompt: Prompt<T>) => {
 
   const shape: Record<string, z.ZodType> = {};
   for (const arg of args) {
-    const completer =
+    const explicitCompleter =
       arg.complete ??
       (prompt.complete
         ? (value: string) => prompt.complete!(arg.name, value)
         : undefined);
-    // On the schema, not here: the SDK derives `prompts/list` arguments from
-    // the schema's JSON Schema.
-    const valueSchema = arg.enum?.length
-      ? z.enum(arg.enum as [string, ...string[]])
+
+    // An enum completes itself unless the author said otherwise. The spec's
+    // prompt argument carries only name/description/required, so `prompts/list`
+    // has nowhere to put the permitted values and completion is the one channel
+    // that can reach the client — without this the argument is validated
+    // against a set the client is never shown.
+    const enumValues = arg.enum;
+    const completer =
+      explicitCompleter ??
+      (enumValues?.length
+        ? async (value: string): Promise<Completion> => ({
+            // An empty value is how an editor asks for the whole set before the
+            // user has typed anything; filtering it would answer with nothing.
+            values: value
+              ? enumValues.filter((option) =>
+                  option.toLowerCase().includes(value.toLowerCase()),
+                )
+              : [...enumValues],
+          })
+        : undefined);
+
+    // The enum belongs on the schema too: that is what `prompts/get` checks the
+    // incoming argument against.
+    const valueSchema = enumValues?.length
+      ? z.enum(enumValues as [string, ...string[]])
       : z.string();
     const described = arg.description
       ? valueSchema.describe(arg.description)
