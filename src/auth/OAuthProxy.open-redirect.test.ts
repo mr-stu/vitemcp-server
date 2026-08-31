@@ -644,4 +644,94 @@ describe("OAuthProxy CWE-601 open-redirect regression", () => {
       await expectAllowed(["http://[::1]:*"], "http://[::1]:9999/cb");
     });
   });
+
+  describe("a CIMD client_id faces the same allow-list as DCR", () => {
+    /**
+     * A URL-formatted `client_id` is resolved by fetching a document from that
+     * URL, which the client's own operator writes. The redirect URIs it
+     * declares are therefore exactly as trustworthy as the ones a DCR request
+     * carries, and have to clear the same allow-list — otherwise anyone able to
+     * host an HTTPS file could name their own callback and be handed the code,
+     * with `allowedRedirectUriPatterns` never consulted.
+     *
+     * The fetch itself is stubbed: the network path and its SSRF defences are
+     * covered in `clientIdMetadata.test.ts`, and what is under test here is
+     * what the proxy does with a document it has already accepted.
+     */
+    const proxyServingDocument = (redirectUris: string[]) => {
+      const proxy = new OAuthProxy(baseConfig);
+
+      (
+        proxy as unknown as {
+          clientIdMetadata: {
+            resolve: (clientId: string) => Promise<unknown>;
+          };
+        }
+      ).clientIdMetadata.resolve = async (clientId: string) => ({
+        client_id: clientId,
+        client_name: "Test Client",
+        redirect_uris: redirectUris,
+      });
+
+      return proxy;
+    };
+
+    const CIMD_CLIENT_ID = "https://client.example.com/client.json";
+
+    it("refuses a document declaring an off-allow-list redirect URI", async () => {
+      // The same URI DCR rejects outright, arriving by the other door.
+      await expectRejected(
+        baseConfig.allowedRedirectUriPatterns,
+        EVIL_REDIRECT,
+      );
+
+      const proxy = proxyServingDocument([EVIL_REDIRECT]);
+
+      await expect(
+        proxy.authorize(
+          buildAuthParams({
+            client_id: CIMD_CLIENT_ID,
+            redirect_uri: EVIL_REDIRECT,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "invalid_client" });
+
+      proxy.destroy();
+    });
+
+    it("refuses the whole client when any declared URI is off the allow-list", async () => {
+      // Registering under a good URI and then using the smuggled one must not
+      // be possible, so one bad entry disqualifies the document.
+      const proxy = proxyServingDocument([LEGIT_REDIRECT, EVIL_REDIRECT]);
+
+      await expect(
+        proxy.authorize(
+          buildAuthParams({
+            client_id: CIMD_CLIENT_ID,
+            redirect_uri: LEGIT_REDIRECT,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "invalid_client" });
+
+      proxy.destroy();
+    });
+
+    it("still admits a document whose URIs all match the allow-list", async () => {
+      const proxy = proxyServingDocument([LEGIT_REDIRECT]);
+
+      const response = await proxy.authorize(
+        buildAuthParams({
+          client_id: CIMD_CLIENT_ID,
+          redirect_uri: LEGIT_REDIRECT,
+        }),
+      );
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toContain(
+        baseConfig.upstreamAuthorizationEndpoint,
+      );
+
+      proxy.destroy();
+    });
+  });
 });

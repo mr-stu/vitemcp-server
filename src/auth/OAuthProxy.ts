@@ -1603,9 +1603,10 @@ export class OAuthProxy {
    */
   private async resolveClientRedirectUris(clientId: string): Promise<string[]> {
     if (this.clientIdMetadata.enabled && isClientIdMetadataUrl(clientId)) {
+      let metadata;
+
       try {
-        const metadata = await this.clientIdMetadata.resolve(clientId);
-        return metadata.redirect_uris;
+        metadata = await this.clientIdMetadata.resolve(clientId);
       } catch (error) {
         throw new OAuthProxyError(
           "invalid_client",
@@ -1614,6 +1615,23 @@ export class OAuthProxy {
             : "Could not resolve client metadata",
         );
       }
+
+      // The document is authored by whoever controls the client_id URL, so the
+      // URIs in it are no more trusted than the ones a DCR request carries and
+      // face the same allow-list. Returning them unchecked would let anyone
+      // able to host an HTTPS file name their own callback and be handed the
+      // authorization code — `allowedRedirectUriPatterns`, and the loopback
+      // default, bypassed by presenting a URL as the client_id.
+      for (const uri of metadata.redirect_uris) {
+        if (!this.validateRedirectUri(uri)) {
+          throw new OAuthProxyError(
+            "invalid_client",
+            `Client metadata declares a redirect URI that is not allowed: ${uri}`,
+          );
+        }
+      }
+
+      return metadata.redirect_uris;
     }
 
     // RFC 6749 §5.2 - reject unknown clients with invalid_client. MCP clients
