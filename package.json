@@ -57,6 +57,16 @@
         "default": "./dist/edge/index.cjs"
       }
     },
+    "./openapi": {
+      "import": {
+        "types": "./dist/openapi/index.d.ts",
+        "default": "./dist/openapi/index.js"
+      },
+      "require": {
+        "types": "./dist/openapi/index.d.cts",
+        "default": "./dist/openapi/index.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {
@@ -73,11 +83,15 @@
     "zod-to-json-schema": "^3.25.0"
   },
   "peerDependencies": {
+    "@apidevtools/swagger-parser": "^12.0.0",
     "ajv": "^8.0.0",
     "ajv-formats": "^3.0.0",
     "jose": "^5.0.0 || ^6.0.0"
   },
   "peerDependenciesMeta": {
+    "@apidevtools/swagger-parser": {
+      "optional": true
+    },
     "ajv": {
       "optional": true
     },
@@ -112,6 +126,7 @@
     "dist"
   ],
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^12.1.0",
     "@eslint/js": "^9.39.1",
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/inspector": "^0.16.8",
@@ -146,7 +161,8 @@
       "src/ViteMCP.ts",
       "src/bin/vitemcp.ts",
       "src/auth/index.ts",
-      "src/edge/index.ts"
+      "src/edge/index.ts",
+      "src/openapi/index.ts"
     ],
     "format": [
       "esm",

@@ -1,0 +1,32 @@
+openapi: 3.0.3
+info:
+  title: Multi-file Pets
+  version: 1.0.0
+servers:
+  - url: https://example.test/api
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "./resources/pets.yaml#/Pet"
+    post:
+      operationId: addPet
+      summary: Add a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "./resources/pets.yaml#/Pet"
+      responses:
+        "200":
+          description: OK

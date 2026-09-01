@@ -30,6 +30,7 @@ A TypeScript framework for building stateless [MCP](https://glama.ai/mcp) server
   - [Multi round-trip requests](#multi-round-trip-requests)
   - [Cacheable results](#cacheable-results)
   - [Client ID Metadata Documents](#client-id-metadata-documents)
+  - [Generating a server from OpenAPI](#generating-a-server-from-openapi)
   - [Migrating from the session-based API](#migrating-from-the-session-based-api)
 - [Server Features](#server-features)
   - [Logging](#logging)
@@ -52,6 +53,7 @@ A TypeScript framework for building stateless [MCP](https://glama.ai/mcp) server
 - [Acknowledgements](#acknowledgements)
 
 Authentication has a dedicated reference — see the [OAuth guide](docs/oauth.md).
+So does OpenAPI conversion — see the [OpenAPI guide](docs/openapi.md).
 
 ## Features
 
@@ -73,6 +75,7 @@ Authentication has a dedicated reference — see the [OAuth guide](docs/oauth.md
 - [Prompt argument auto-completion](#prompt-argument-auto-completion)
 - [Cacheable list results](#cacheable-results) (`ttlMs` / `cacheScope`)
 - [Health-check endpoint](#health-check-endpoint)
+- [Generate a whole server from an OpenAPI document](#generating-a-server-from-openapi)
 - [In-memory transport](#unit-testing-with-an-in-memory-transport) for unit testing without binding a port
 - CLI for [testing](#test-with-mcp-cli) and [debugging](#inspect-with-mcp-inspector)
 
@@ -1407,6 +1410,55 @@ const authProxy = new OAuthProxy({
   },
 });
 ```
+
+### Generating a server from OpenAPI
+
+`fromOpenAPI()` turns an OpenAPI 3.x document into a server, one tool per
+operation. Parameters and the request body are flattened into a single argument
+list, `$ref`s are resolved, and each tool calls the real API when invoked.
+
+```ts
+import { fromOpenAPI } from "@vitemcp/server/openapi";
+
+const server = await fromOpenAPI({
+  headers: { authorization: `Bearer ${process.env.API_TOKEN}` },
+  include: (operation) => operation.tags.includes("pet"),
+  spec: "https://petstore3.swagger.io/api/v3/openapi.json",
+});
+
+await server.start({ transportType: "stdio" });
+```
+
+`spec` takes a URL, a file path, inline JSON, or a parsed object. The result is
+an ordinary `ViteMCP` instance — add your own tools to it, or pass `server` to
+register the generated ones onto a server you already have.
+
+Because ViteMCP is stateless, `headers` can be a function instead of an object,
+and it runs per request:
+
+```ts
+await fromOpenAPI<Session>({
+  headers: (context) => ({
+    authorization: `Bearer ${context.auth!.upstreamToken}`,
+  }),
+  server,
+  spec: "./openapi.json",
+});
+```
+
+Credentials given this way are applied after the operation's own parameters, so
+a model that supplies its own `authorization` argument cannot displace them.
+
+Selecting operations is required rather than optional. A document with two
+hundred operations makes a tool list no client can present, so with no
+`include`, `exclude` or `maxTools`, more than 40 operations is an error rather
+than a large server.
+
+YAML documents and documents whose `$ref`s point at other files need the
+optional `@apidevtools/swagger-parser` peer dependency; a single-file JSON
+document needs nothing extra.
+
+Full reference: the [OpenAPI guide](docs/openapi.md).
 
 ### Migrating from the session-based API
 

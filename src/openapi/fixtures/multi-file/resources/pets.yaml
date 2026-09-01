@@ -1,0 +1,13 @@
+Pet:
+  type: object
+  required:
+    - name
+  properties:
+    id:
+      type: integer
+    name:
+      type: string
+    tag:
+      $ref: "#/Tag"
+Tag:
+  type: string
