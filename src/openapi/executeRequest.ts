@@ -208,12 +208,22 @@ const buildBody = (
     const form = new URLSearchParams();
 
     for (const [name, value] of Object.entries(payload)) {
-      if (value !== undefined) {
+      if (value === undefined) {
+        continue;
+      }
+
+      // OpenAPI's default for a form-encoded body property is `style: form,
+      // explode: true`, so an array is repeated once per entry — the same
+      // shape as an exploded query parameter, and what a server reading the
+      // form expects. A nested object still travels as one JSON value: form
+      // encoding has no standard shape for it, and the document's `encoding`
+      // object, which could say otherwise, is not read.
+      for (const entry of Array.isArray(value) ? value : [value]) {
         form.append(
           name,
-          typeof value === "object" && value !== null
-            ? JSON.stringify(value)
-            : String(value),
+          typeof entry === "object" && entry !== null
+            ? JSON.stringify(entry)
+            : String(entry),
         );
       }
     }

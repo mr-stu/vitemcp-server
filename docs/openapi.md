@@ -265,6 +265,11 @@ staging host.
   and text or XML (sent as a single `body` string). `multipart/form-data` and
   binary uploads are not constructed; an operation that only accepts one says so
   in its description and sends no body.
+- **Form-encoded bodies** follow the OpenAPI default, `style: form` with
+  `explode: true`: an array property is repeated once per entry, and a nested
+  object is sent as one JSON value. The request body's `encoding` object is
+  not read, so a document asking for `deepObject` (`metadata[key]=value`) gets
+  the default.
 - **A body on a `GET`** is legal in OpenAPI and rejected by `fetch`, so it is
   left out of the schema rather than advertised and then refused.
 - **No response validation** beyond the optional `outputSchema`.

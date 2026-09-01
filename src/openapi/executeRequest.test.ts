@@ -265,6 +265,56 @@ describe("building the request", () => {
     );
     expect(calls[0].body).toBe("grant_type=client_credentials");
   });
+
+  it("repeats an array-valued form property once per entry", async () => {
+    const { calls, client } = await withRecordedCalls({
+      info: { title: "Payments", version: "1.0.0" },
+      openapi: "3.0.3",
+      paths: {
+        "/charges": {
+          post: {
+            operationId: "createCharge",
+            requestBody: {
+              content: {
+                "application/x-www-form-urlencoded": {
+                  schema: {
+                    properties: {
+                      amount: { type: "integer" },
+                      expand: { items: { type: "string" }, type: "array" },
+                      metadata: {
+                        additionalProperties: { type: "string" },
+                        type: "object",
+                      },
+                    },
+                    type: "object",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      servers: [{ url: "https://api.example.test" }],
+    });
+
+    await client.callTool({
+      arguments: {
+        amount: 500,
+        expand: ["customer", "invoice"],
+        metadata: { order: "42" },
+      },
+      name: "createCharge",
+    });
+
+    const body = new URLSearchParams(calls[0].body);
+
+    // The OpenAPI default for a form body is `style: form, explode: true`:
+    // one `expand=` per entry, not one JSON-encoded array.
+    expect(body.getAll("expand")).toEqual(["customer", "invoice"]);
+    expect(body.get("amount")).toBe("500");
+    // A nested object has no standard form encoding, so it stays one value.
+    expect(body.get("metadata")).toBe('{"order":"42"}');
+  });
 });
 
 describe("reading the response", () => {
