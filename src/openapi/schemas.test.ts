@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { HttpRoute, OpenApiDocument } from "./types.js";
+import type { HttpRoute, OpenApiDocument, OpenApiSchema } from "./types.js";
 
 import { createSchemaNormalizer } from "./normalize.js";
 import { extractRoutes } from "./routes.js";
@@ -372,6 +372,87 @@ describe("output schemas", () => {
       $ref: "#/$defs/Pet",
       type: "object",
     });
+  });
+
+  /**
+   * A document whose `Root` component reaches `total - 1` others, which is how
+   * a large document's schemas relate: one root, the rest pulled in
+   * transitively. `Root` counts toward the total, so the response schema
+   * collects exactly `total` definitions.
+   */
+  const documentReferencing = (
+    total: number,
+    withRequestBody = false,
+  ): OpenApiDocument => {
+    const parts = total - 1;
+    const schemas: Record<string, OpenApiSchema> = {
+      Root: {
+        properties: Object.fromEntries(
+          Array.from({ length: parts }, (_, index) => [
+            `field${index}`,
+            { $ref: `#/components/schemas/Part${index}` },
+          ]),
+        ),
+        type: "object",
+      },
+    };
+
+    for (let index = 0; index < parts; index++) {
+      schemas[`Part${index}`] = { properties: { id: {} }, type: "object" };
+    }
+
+    return {
+      components: { schemas },
+      openapi: "3.0.3",
+      paths: {
+        "/pets": {
+          post: {
+            ...(withRequestBody
+              ? {
+                  requestBody: jsonBody({
+                    properties: {
+                      payload: { $ref: "#/components/schemas/Root" },
+                    },
+                    type: "object",
+                  }),
+                }
+              : {}),
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/Root" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+  };
+
+  it("keeps a response schema that stays within the definition cap", () => {
+    const [{ binding }] = bind(documentReferencing(100), true);
+
+    expect(Object.keys(binding.outputSchema?.$defs ?? {})).toHaveLength(100);
+  });
+
+  it("drops a response schema that pulls in more definitions than the cap", () => {
+    // Every tool's schema travels in one `tools/list`, so a runaway schema is
+    // dropped rather than truncated: dangling `$ref`s would break the others.
+    const [{ binding }] = bind(documentReferencing(101), true);
+
+    expect(binding.outputSchema).toBeUndefined();
+  });
+
+  it("leaves the input schema alone however many definitions it pulls in", () => {
+    const [{ binding }] = bind(documentReferencing(101, true), true);
+
+    // The cap is a policy about what is safe to drop, and only a response
+    // schema is: dropping an input schema would leave the tool uncallable.
+    expect(Object.keys(binding.inputSchema.$defs ?? {})).toHaveLength(101);
+    expect(binding.outputSchema).toBeUndefined();
   });
 });
 

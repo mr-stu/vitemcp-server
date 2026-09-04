@@ -187,6 +187,19 @@ const describeBody = (
 };
 
 /**
+ * How many `$defs` one response schema may pull in before it is dropped.
+ *
+ * Response schemas reference the document's shared components far more freely
+ * than request bodies do, and `tools/list` carries every tool's at once. On
+ * Stripe's document the median operation reaches 868 definitions and roughly
+ * 1MB, which is 362MB across the server — unsendable, and slow well before it
+ * fails. The same document splits cleanly either side of this number: schemas
+ * either stay under 50 definitions or jump past 500, nothing in between, so a
+ * cap in that gap drops the runaway schemas and keeps every tractable one.
+ */
+const MAX_OUTPUT_SCHEMA_DEFINITIONS = 100;
+
+/**
  * Derives a tool's `outputSchema` from its first successful JSON response.
  *
  * Only an object-typed response qualifies: MCP requires `structuredContent` to
@@ -216,6 +229,17 @@ const buildOutputSchema = (
   }
 
   const definitions = collectDefinitions(schema, normalizer.definitions);
+
+  // Dropping the schema, rather than truncating its definitions, is what keeps
+  // the result usable: a schema whose `$ref`s no longer resolve is worse than
+  // no schema at all. The tool falls back to returning text, which is what it
+  // does for every operation that declares no response schema.
+  if (
+    definitions &&
+    Object.keys(definitions).length > MAX_OUTPUT_SCHEMA_DEFINITIONS
+  ) {
+    return undefined;
+  }
 
   return {
     ...schema,

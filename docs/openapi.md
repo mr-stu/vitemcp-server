@@ -224,6 +224,12 @@ on when the document is generated from the server's own types.
 Only object-typed responses get a schema; an array or scalar response is left
 undeclared, since structured content cannot carry one.
 
+A response schema pulling in more than 100 shared definitions is also left
+undeclared. Every tool's schema travels in one `tools/list`, and on a large
+document the response schemas reach most of the components table: unbounded,
+Stripe's would be roughly 362MB across the server. Those tools return text, as
+they would for an operation that declares no response schema at all.
+
 ## The base URL
 
 Resolved from the operation's `servers`, then the path item's, then the
