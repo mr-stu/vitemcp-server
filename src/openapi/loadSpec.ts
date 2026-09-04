@@ -1,5 +1,7 @@
 import type { OpenApiDocument } from "./types.js";
 
+import { cancelResponseBody } from "../cancelResponseBody.js";
+
 export type LoadedSpec = {
   document: OpenApiDocument;
   /**
@@ -154,6 +156,7 @@ const readSpecText = async (spec: string): Promise<string> => {
     });
 
     if (!response.ok) {
+      await cancelResponseBody(response);
       throw new Error(
         `Failed to fetch the OpenAPI document from ${spec}: ${response.status} ${response.statusText}`,
       );

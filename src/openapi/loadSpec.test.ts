@@ -1,6 +1,6 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { loadSpec } from "./loadSpec.js";
 
@@ -63,6 +63,33 @@ describe("loadSpec", () => {
     expect(document.info?.title).toBe("Pets");
     // Kept so that a relative `servers` entry has something to resolve against.
     expect(origin).toBe(url);
+  });
+
+  it("releases the response body when the fetch fails", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      cancel: () => {
+        cancelled = true;
+      },
+      start: (controller) => controller.enqueue(new TextEncoder().encode("no")),
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(body, { status: 404, statusText: "Not Found" }),
+      );
+
+    try {
+      await expect(
+        loadSpec("https://example.test/openapi.json"),
+      ).rejects.toThrow(/Failed to fetch the OpenAPI document/);
+
+      // Left unread, the body holds its socket until GC runs.
+      expect(cancelled).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("rejects Swagger 2.0 with a pointer at what to do about it", async () => {
