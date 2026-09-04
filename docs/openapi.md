@@ -266,10 +266,11 @@ staging host.
   binary uploads are not constructed; an operation that only accepts one says so
   in its description and sends no body.
 - **Form-encoded bodies** follow the OpenAPI default, `style: form` with
-  `explode: true`: an array property is repeated once per entry, and a nested
-  object is sent as one JSON value. The request body's `encoding` object is
-  not read, so a document asking for `deepObject` (`metadata[key]=value`) gets
-  the default.
+  `explode: true`: an array of scalars is repeated once per entry. Anything
+  nested — an object, or an array of objects — is bracketed
+  (`metadata[order]=42`, `items[0][price]=p1`), which is what the APIs
+  accepting nested form bodies read. The request body's `encoding` object is
+  not consulted.
 - **A body on a `GET`** is legal in OpenAPI and rejected by `fetch`, so it is
   left out of the schema rather than advertised and then refused.
 - **No response validation** beyond the optional `outputSchema`.

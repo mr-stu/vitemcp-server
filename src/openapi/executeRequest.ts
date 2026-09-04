@@ -175,6 +175,51 @@ export const resolveBaseUrl = (
   }
 };
 
+/**
+ * Appends one form-encoded body property, bracketing anything nested.
+ *
+ * OpenAPI's `style`/`explode` pair only describes flat values, so a nested
+ * object has no encoding the specification defines. Sending it as one JSON
+ * string is the reading a server never expects: it wants fields. The bracket
+ * convention — `metadata[order]=42`, as popularised by Stripe — is what the
+ * APIs accepting nested form bodies actually parse, so it is what a nested
+ * value serializes to here.
+ */
+const appendFormValue = (
+  form: URLSearchParams,
+  name: string,
+  value: unknown,
+): void => {
+  if (value === undefined) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    // A flat array keeps OpenAPI's `explode: true` default and repeats the
+    // key. Indices appear only once an entry is itself nested, where repeating
+    // the key would run every entry's fields together into one.
+    const nested = value.some(
+      (entry) => typeof entry === "object" && entry !== null,
+    );
+
+    for (const [index, entry] of value.entries()) {
+      appendFormValue(form, nested ? `${name}[${index}]` : name, entry);
+    }
+
+    return;
+  }
+
+  if (isRecord(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      appendFormValue(form, `${name}[${key}]`, entry);
+    }
+
+    return;
+  }
+
+  form.append(name, String(value));
+};
+
 const buildBody = (
   binding: ToolBinding,
   values: Record<string, unknown>,
@@ -208,24 +253,7 @@ const buildBody = (
     const form = new URLSearchParams();
 
     for (const [name, value] of Object.entries(payload)) {
-      if (value === undefined) {
-        continue;
-      }
-
-      // OpenAPI's default for a form-encoded body property is `style: form,
-      // explode: true`, so an array is repeated once per entry — the same
-      // shape as an exploded query parameter, and what a server reading the
-      // form expects. A nested object still travels as one JSON value: form
-      // encoding has no standard shape for it, and the document's `encoding`
-      // object, which could say otherwise, is not read.
-      for (const entry of Array.isArray(value) ? value : [value]) {
-        form.append(
-          name,
-          typeof entry === "object" && entry !== null
-            ? JSON.stringify(entry)
-            : String(entry),
-        );
-      }
+      appendFormValue(form, name, value);
     }
 
     return form.toString();

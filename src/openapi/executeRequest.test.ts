@@ -82,6 +82,41 @@ const petstore: OpenApiDocument = {
   servers: [{ url: "https://api.example.test/v1" }],
 };
 
+/** Shaped after the form-encoded APIs that accept nested bodies. */
+const formBodySpec: OpenApiDocument = {
+  info: { title: "Payments", version: "1.0.0" },
+  openapi: "3.0.3",
+  paths: {
+    "/charges": {
+      post: {
+        operationId: "createCharge",
+        requestBody: {
+          content: {
+            "application/x-www-form-urlencoded": {
+              schema: {
+                properties: {
+                  amount: { type: "integer" },
+                  expand: { items: { type: "string" }, type: "array" },
+                  items: {
+                    items: {
+                      properties: { price: { type: "string" } },
+                      type: "object",
+                    },
+                    type: "array",
+                  },
+                  metadata: { type: "object" },
+                },
+                type: "object",
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  servers: [{ url: "https://api.example.test" }],
+};
+
 describe("building the request", () => {
   it("routes each argument to the location its parameter names", async () => {
     const { calls, client } = await withRecordedCalls(petstore);
@@ -267,35 +302,7 @@ describe("building the request", () => {
   });
 
   it("repeats an array-valued form property once per entry", async () => {
-    const { calls, client } = await withRecordedCalls({
-      info: { title: "Payments", version: "1.0.0" },
-      openapi: "3.0.3",
-      paths: {
-        "/charges": {
-          post: {
-            operationId: "createCharge",
-            requestBody: {
-              content: {
-                "application/x-www-form-urlencoded": {
-                  schema: {
-                    properties: {
-                      amount: { type: "integer" },
-                      expand: { items: { type: "string" }, type: "array" },
-                      metadata: {
-                        additionalProperties: { type: "string" },
-                        type: "object",
-                      },
-                    },
-                    type: "object",
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      servers: [{ url: "https://api.example.test" }],
-    });
+    const { calls, client } = await withRecordedCalls(formBodySpec);
 
     await client.callTool({
       arguments: {
@@ -312,8 +319,40 @@ describe("building the request", () => {
     // one `expand=` per entry, not one JSON-encoded array.
     expect(body.getAll("expand")).toEqual(["customer", "invoice"]);
     expect(body.get("amount")).toBe("500");
-    // A nested object has no standard form encoding, so it stays one value.
-    expect(body.get("metadata")).toBe('{"order":"42"}');
+    // A nested object is bracketed, which is the encoding an API accepting
+    // nested form bodies reads. One JSON value would arrive as a single string.
+    expect(body.get("metadata[order]")).toBe("42");
+  });
+
+  it("brackets a nested form object rather than JSON-encoding it", async () => {
+    const { calls, client } = await withRecordedCalls(formBodySpec);
+
+    await client.callTool({
+      arguments: { metadata: { nested: { deep: "yes" }, order: "42" } },
+      name: "createCharge",
+    });
+
+    const body = new URLSearchParams(calls[0].body);
+
+    expect(body.get("metadata[order]")).toBe("42");
+    expect(body.get("metadata[nested][deep]")).toBe("yes");
+    expect(calls[0].body).not.toContain("%7B");
+  });
+
+  it("indexes an array of objects so the entries stay apart", async () => {
+    const { calls, client } = await withRecordedCalls(formBodySpec);
+
+    await client.callTool({
+      arguments: { items: [{ price: "p1" }, { price: "p2" }] },
+      name: "createCharge",
+    });
+
+    const body = new URLSearchParams(calls[0].body);
+
+    // Repeating the key here would leave the server unable to tell which
+    // `price` belonged to which entry.
+    expect(body.get("items[0][price]")).toBe("p1");
+    expect(body.get("items[1][price]")).toBe("p2");
   });
 });
 
