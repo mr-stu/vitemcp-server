@@ -30,6 +30,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import http from "http";
 import https from "https";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 import { setTimeout as delay } from "timers/promises";
 import { fetch } from "undici";
 import parseURITemplate from "uri-templates";
@@ -1370,18 +1372,59 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
           );
 
           res.writeHead(response.status, Object.fromEntries(response.headers));
-          res.end(Buffer.from(await response.arrayBuffer()));
+
+          if (!response.body) {
+            res.end();
+            return;
+          }
+
+          // Node holds the head back until the first body byte, which for an
+          // SSE stream means the client's `fetch` stays pending until the
+          // first event — and a stream that fails before then is a bare
+          // socket close with no status to read.
+          res.flushHeaders();
+
+          // Piped, not buffered: `arrayBuffer()` withholds every byte until
+          // the handler is done, which collapses an SSE stream into a single
+          // delivery at the end — `reportProgress` then lands with the tool
+          // result instead of during the call. `pipeline` also carries a
+          // client disconnect back into the body, so an abandoned stream
+          // stops producing.
+          await pipeline(Readable.fromWeb(response.body), res);
         } catch (error) {
+          // Past `writeHead` the exchange is committed: no status is left to
+          // send, and ending cleanly would frame a truncated body as a whole
+          // one. Abort so the client reads it as the failure it is.
+          if (res.headersSent) {
+            // A client that hung up first is routine, and its own doing.
+            const disconnected =
+              (error as NodeJS.ErrnoException).code ===
+              "ERR_STREAM_PREMATURE_CLOSE";
+
+            if (disconnected) {
+              this.#logger.debug(
+                `[ViteMCP debug] client disconnected mid-response:`,
+                error,
+              );
+            } else {
+              this.#logger.error(
+                `[ViteMCP error] response stream failed:`,
+                error,
+              );
+            }
+
+            res.destroy();
+            return;
+          }
+
           // A body that aborts mid-stream rejects here. Settle with a 400
           // rather than leaving the exchange pending forever.
           this.#logger.debug(`[ViteMCP debug] request failed:`, error);
 
-          if (!res.headersSent) {
-            res.writeHead(400, {
-              Connection: "close",
-              "Content-Type": "application/json",
-            });
-          }
+          res.writeHead(400, {
+            Connection: "close",
+            "Content-Type": "application/json",
+          });
 
           res.end(
             JSON.stringify({

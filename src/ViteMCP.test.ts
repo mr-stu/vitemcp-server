@@ -8,6 +8,9 @@ import { z as z4 } from "zod/v4";
 import { runWithTestServer, withoutEnvelope } from "./testHarness.js";
 import { audioContent, imageContent, UserError, ViteMCP } from "./ViteMCP.js";
 
+/** Per-step work in the progress-timing test; long enough to time reliably. */
+const PROGRESS_STEP_MS = 100;
+
 test("adds tools", async () => {
   await runWithTestServer({
     run: async ({ client }) => {
@@ -540,6 +543,58 @@ test("tracks tool progress", async () => {
           a: z.number(),
           b: z.number(),
         }),
+      });
+
+      return server;
+    },
+  });
+});
+
+test("delivers tool progress during the call, not with the result", async () => {
+  await runWithTestServer({
+    run: async ({ client }) => {
+      const startedAt = Date.now();
+      const arrivals: number[] = [];
+
+      await client.callTool(
+        { arguments: {}, name: "slow" },
+        {
+          onprogress: () => {
+            arrivals.push(Date.now() - startedAt);
+          },
+        },
+      );
+
+      expect(arrivals).toHaveLength(3);
+
+      // Buffering the SSE stream still delivers every notification, just all
+      // at once as the response closes — which makes progress useless without
+      // failing any count-based assertion. So assert the spacing instead: the
+      // first update lands while two steps are still outstanding, and the
+      // three arrive spread across the call rather than bunched at its end.
+      expect(arrivals[0]).toBeLessThan(PROGRESS_STEP_MS * 2);
+      expect(arrivals[2] - arrivals[0]).toBeGreaterThanOrEqual(
+        PROGRESS_STEP_MS,
+      );
+    },
+    server: async () => {
+      const server = new ViteMCP({
+        name: "Test",
+        version: "1.0.0",
+      });
+
+      server.addTool({
+        description: "Reports progress while it works",
+        execute: async (_args, { reportProgress }) => {
+          for (const step of [1, 2, 3]) {
+            await delay(PROGRESS_STEP_MS);
+            await reportProgress({ progress: step, total: 3 });
+          }
+
+          return "done";
+        },
+        name: "slow",
+        parameters: z.object({}),
       });
 
       return server;

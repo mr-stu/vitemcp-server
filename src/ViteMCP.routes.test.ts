@@ -1,11 +1,15 @@
 import type { Context } from "hono";
 
+import { setTimeout as delay } from "timers/promises";
 import { fetch } from "undici";
 import { expect, test } from "vitest";
 import { z } from "zod";
 
 import { runWithTestServer } from "./testHarness.js";
 import { ViteMCP } from "./ViteMCP.js";
+
+/** Long enough that a buffered body is unmistakably late, short in a suite. */
+const CHUNK_DELAY_MS = 150;
 
 test("custom routes handle GET requests", async () => {
   await runWithTestServer({
@@ -919,4 +923,114 @@ test("route options validation", async () => {
       return c.json({ test: 4 });
     });
   }).not.toThrow();
+});
+
+test("custom route bodies stream instead of buffering", async () => {
+  await runWithTestServer({
+    run: async ({ port }) => {
+      const startedAt = Date.now();
+      const response = await fetch(`http://localhost:${port}/slow-stream`);
+
+      // Headers must be readable before the first chunk exists, or an SSE
+      // client waits on the handler rather than on the event it wants.
+      expect(Date.now() - startedAt).toBeLessThan(CHUNK_DELAY_MS);
+
+      const arrivals: number[] = [];
+      const decoder = new TextDecoder();
+      let received = "";
+
+      for await (const chunk of response.body!) {
+        arrivals.push(Date.now() - startedAt);
+        received += decoder.decode(chunk as Uint8Array, { stream: true });
+      }
+
+      expect(received).toBe("chunk 1\nchunk 2\nchunk 3\n");
+
+      // Buffering the body would land all three at once at the very end; the
+      // point of the assertion is that each is delivered as it is produced.
+      expect(arrivals).toHaveLength(3);
+      expect(arrivals[0]).toBeLessThan(CHUNK_DELAY_MS * 2);
+    },
+    server: async () => {
+      const server = new ViteMCP({
+        name: "Test",
+        version: "1.0.0",
+      });
+
+      const app = server.getApp();
+
+      app.get("/slow-stream", () => {
+        const encoder = new TextEncoder();
+        let emitted = 0;
+
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              if (emitted >= 3) {
+                controller.close();
+                return;
+              }
+
+              emitted += 1;
+              await delay(CHUNK_DELAY_MS);
+              controller.enqueue(encoder.encode(`chunk ${emitted}\n`));
+            },
+          }),
+          { headers: { "Content-Type": "text/plain" } },
+        );
+      });
+
+      return server;
+    },
+  });
+});
+
+test("custom route stream that fails mid-body aborts the response", async () => {
+  await runWithTestServer({
+    run: async ({ port }) => {
+      const response = await fetch(`http://localhost:${port}/failing-stream`);
+
+      // The head is already committed, so the failure cannot be restated as a
+      // status — it must not be dressed up as a different response either.
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/plain");
+
+      // Ending cleanly would frame the truncated body as the whole body, so
+      // the read has to fail rather than return what arrived before the error.
+      await expect(response.text()).rejects.toThrow();
+    },
+    server: async () => {
+      const server = new ViteMCP({
+        // The abort is expected; keep it out of the suite's output.
+        logger: { ...console, error: () => {} },
+        name: "Test",
+        version: "1.0.0",
+      });
+
+      const app = server.getApp();
+
+      app.get("/failing-stream", () => {
+        const encoder = new TextEncoder();
+        let pulls = 0;
+
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulls += 1;
+
+              if (pulls === 1) {
+                controller.enqueue(encoder.encode("first chunk"));
+                return;
+              }
+
+              controller.error(new Error("stream failed after first chunk"));
+            },
+          }),
+          { headers: { "Content-Type": "text/plain" } },
+        );
+      });
+
+      return server;
+    },
+  });
 });
