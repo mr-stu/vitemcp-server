@@ -521,6 +521,18 @@ export type ViteMCPAuth = Record<string, unknown> | undefined;
 
 type Literal = boolean | null | number | string | undefined;
 
+/**
+ * Name and URI of the placeholder registered — and immediately removed — to
+ * latch a primitive family's request handlers when `canAccess` hid every
+ * member of it from this caller. See `#buildServer`. Never reaches the wire.
+ *
+ * The name holds to the SEP tool-name charset (`A-Za-z0-9._-`) even though it
+ * is never listed: the SDK validates on registration, so a `/` in here would
+ * put a five-line naming warning on every fully-filtered request.
+ */
+const LATCH_NAME = "vitemcp.internal.capability-latch";
+const LATCH_URI = "vitemcp-internal:capability-latch";
+
 export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
   /**
    * The `auth` provider this server was constructed with, or `undefined` when
@@ -929,11 +941,18 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
       { instructions: this.#options.instructions },
     );
 
-    for (const tool of this.#tools) {
-      if (tool.canAccess && !tool.canAccess(auth)) {
-        continue;
-      }
+    const visible = <
+      P extends { canAccess?: (auth: T | undefined) => boolean },
+    >(
+      all: readonly P[],
+    ): P[] => all.filter((entry) => !entry.canAccess || entry.canAccess(auth));
 
+    const tools = visible(this.#tools);
+    const resources = visible(this.#resources);
+    const resourceTemplates = visible(this.#resourceTemplates);
+    const prompts = visible(this.#prompts);
+
+    for (const tool of tools) {
       server.registerTool(
         tool.name,
         {
@@ -983,11 +1002,7 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
       );
     }
 
-    for (const resource of this.#resources) {
-      if (resource.canAccess && !resource.canAccess(auth)) {
-        continue;
-      }
-
+    for (const resource of resources) {
       server.registerResource(
         resource.name,
         resource.uri,
@@ -1016,11 +1031,7 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
       );
     }
 
-    for (const template of this.#resourceTemplates) {
-      if (template.canAccess && !template.canAccess(auth)) {
-        continue;
-      }
-
+    for (const template of resourceTemplates) {
       const complete: Record<string, (value: string) => Promise<string[]>> = {};
       for (const arg of template.arguments ?? []) {
         const completer =
@@ -1066,11 +1077,7 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
       );
     }
 
-    for (const prompt of this.#prompts) {
-      if (prompt.canAccess && !prompt.canAccess(auth)) {
-        continue;
-      }
-
+    for (const prompt of prompts) {
       server.registerPrompt(
         prompt.name,
         {
@@ -1100,6 +1107,42 @@ export class ViteMCP<T extends ViteMCPAuth = ViteMCPAuth> {
           }
         }) as never,
       );
+    }
+
+    // `canAccess` is documented to filter rejected primitives out of the list,
+    // so a caller who may see none of them is owed an empty list. The SDK
+    // registers a family's request handlers — and its capability — on the
+    // first `registerTool`/`registerResource`/`registerPrompt`, so a request
+    // that registered nothing never got them and `tools/list` came back
+    // `-32601 Method not found`: the method does not exist, rather than the
+    // caller may see nothing in it. Registering a placeholder and removing it
+    // latches the handlers without the placeholder ever being listed or
+    // callable — and it cannot collide, because this runs only when nothing
+    // else in the family registered. A server carrying none of a primitive at
+    // all still advertises nothing, so `-32601` stays correct there.
+    if (this.#tools.length > 0 && tools.length === 0) {
+      server
+        .registerTool(LATCH_NAME, {}, (() => ({ content: [] })) as never)
+        .remove();
+    }
+
+    // One registration latches `resources/list`, `resources/templates/list`
+    // and `resources/read` together, so the two resource families share it.
+    if (
+      this.#resources.length + this.#resourceTemplates.length > 0 &&
+      resources.length + resourceTemplates.length === 0
+    ) {
+      server
+        .registerResource(LATCH_NAME, LATCH_URI, {}, (() => ({
+          contents: [],
+        })) as never)
+        .remove();
+    }
+
+    if (this.#prompts.length > 0 && prompts.length === 0) {
+      server
+        .registerPrompt(LATCH_NAME, {}, (() => ({ messages: [] })) as never)
+        .remove();
     }
 
     return server;

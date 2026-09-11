@@ -261,7 +261,8 @@ guard everything else with `canAccess`. Unauthenticated requests are then served
 with `auth` set to `undefined`.
 
 `canAccess` filters rejected tools out of `tools/list` entirely, so clients never
-see the ones they may not call.
+see the ones they may not call. A caller who may call none of them gets an empty
+list rather than an error.
 
 ```typescript
 import {

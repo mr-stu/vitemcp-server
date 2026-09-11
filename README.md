@@ -388,7 +388,7 @@ The wrapper must stand alone: `{ structuredContent }`, optionally with `isError`
 
 #### Restricting who can call a tool
 
-A tool's optional `canAccess` receives the request's auth context and returns whether the caller may use it. Tools it rejects are filtered out of `tools/list` entirely.
+A tool's optional `canAccess` receives the request's auth context and returns whether the caller may use it. Tools it rejects are filtered out of `tools/list` entirely. A caller who may use none of them gets an empty list rather than an error.
 
 ```typescript
 server.addTool({
