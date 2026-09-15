@@ -126,6 +126,29 @@ describe("OAuthProxy CIMD client resolution across legs", () => {
     ).rejects.toMatchObject({ code: "invalid_grant" });
   });
 
+  it('advertises "none" as a token endpoint auth method when CIMD is enabled', () => {
+    expect(
+      proxy.getAuthorizationServerMetadata().tokenEndpointAuthMethodsSupported,
+    ).toContain("none");
+  });
+
+  it('omits "none" when CIMD is disabled', () => {
+    const dcrOnly = new OAuthProxy({
+      ...baseConfig,
+      clientIdMetadata: { enabled: false },
+      encryptionKey: false,
+    });
+
+    try {
+      expect(
+        dcrOnly.getAuthorizationServerMetadata()
+          .tokenEndpointAuthMethodsSupported,
+      ).not.toContain("none");
+    } finally {
+      dcrOnly.destroy();
+    }
+  });
+
   it("keeps rejecting a genuinely unknown client_id at the token endpoint", async () => {
     await expect(
       proxy.exchangeAuthorizationCode({

@@ -433,9 +433,15 @@ export class OAuthProxy {
       responseTypesSupported: ["code"],
       scopesSupported: this.config.scopes || [],
       tokenEndpoint: `${this.config.baseUrl}/oauth/token`,
+      // RFC 8414 §2. A CIMD client is a public client: it has no registration
+      // response to carry a secret, and authenticates the exchange with PKCE
+      // alone. A client that reads this list to pick an auth method finds
+      // nothing it can use unless "none" is advertised alongside the
+      // confidential methods DCR clients use.
       tokenEndpointAuthMethodsSupported: [
         "client_secret_basic",
         "client_secret_post",
+        ...(this.clientIdMetadata.enabled ? ["none"] : []),
       ],
     };
   }
