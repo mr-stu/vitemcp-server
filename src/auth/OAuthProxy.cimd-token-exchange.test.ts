@@ -22,7 +22,7 @@ import { OAuthProxy } from "./OAuthProxy.js";
 
 // `vi.mock` is hoisted above module initialisation, so the document the factory
 // serves has to be hoisted with it.
-const { CIMD_DOCUMENT, CLIENT_ID } = vi.hoisted(() => {
+const { CIMD_DOCUMENT, CLIENT_ID, served } = vi.hoisted(() => {
   const clientId = "https://client.example.com/metadata.json";
 
   return {
@@ -36,6 +36,11 @@ const { CIMD_DOCUMENT, CLIENT_ID } = vi.hoisted(() => {
       token_endpoint_auth_method: "none",
     },
     CLIENT_ID: clientId,
+    // Overrides for tests that need the document to change under the proxy.
+    served: {
+      cacheControl: undefined as string | undefined,
+      document: undefined as Record<string, unknown> | undefined,
+    },
   };
 });
 
@@ -55,8 +60,15 @@ vi.mock("undici", async (importOriginal) => {
       const { Readable } = await import("node:stream");
 
       return {
-        body: Readable.from([Buffer.from(JSON.stringify(CIMD_DOCUMENT))]),
-        headers: { "content-type": "application/json" },
+        body: Readable.from([
+          Buffer.from(JSON.stringify(served.document ?? CIMD_DOCUMENT)),
+        ]),
+        headers: {
+          ...(served.cacheControl
+            ? { "cache-control": served.cacheControl }
+            : {}),
+          "content-type": "application/json",
+        },
         statusCode: 200,
       };
     }),
@@ -90,10 +102,13 @@ describe("OAuthProxy CIMD client resolution across legs", () => {
   let proxy: OAuthProxy;
 
   beforeEach(() => {
+    served.cacheControl = undefined;
+    served.document = undefined;
     proxy = new OAuthProxy({ ...baseConfig, encryptionKey: false });
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     proxy.destroy();
   });
 
@@ -159,5 +174,96 @@ describe("OAuthProxy CIMD client resolution across legs", () => {
         redirect_uri: EPHEMERAL_REDIRECT,
       }),
     ).rejects.toMatchObject({ code: "invalid_client" });
+  });
+  /**
+   * Drive a whole authorization: authorize, then hand the upstream callback
+   * back. The upstream token endpoint is stubbed, so this exercises the
+   * callback leg — where the transaction's concrete callback URL is checked
+   * against what the client declares — rather than stopping at authorize().
+   */
+  const roundTrip = async (redirectUri: string): Promise<Response> => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "upstream-access-token",
+              expires_in: 3600,
+              refresh_token: "upstream-refresh-token",
+              scope: "openid",
+              token_type: "Bearer",
+            }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
+      ),
+    );
+
+    const authorizeResponse = await proxy.authorize(
+      buildAuthParams(redirectUri),
+    );
+    const upstreamUrl = new URL(
+      authorizeResponse.headers.get("location") as string,
+    );
+    const state = upstreamUrl.searchParams.get("state") as string;
+
+    return await proxy.handleCallback(
+      new Request(
+        `${baseConfig.baseUrl}${baseConfig.redirectPath}?code=upstream-code&state=${state}`,
+      ),
+    );
+  };
+
+  it("completes the round trip to the ephemeral port the client bound", async () => {
+    const callback = await roundTrip(EPHEMERAL_REDIRECT);
+    const location = new URL(callback.headers.get("location") as string);
+
+    expect(location.origin).toBe("http://localhost:52430");
+    expect(location.pathname).toBe("/callback");
+    expect(location.searchParams.get("code")).toBeTruthy();
+  });
+
+  /**
+   * A native client binds a fresh ephemeral port on every run, so the second
+   * login of the same client presents a port the first one never used. Both
+   * legs have to agree about it: resolving the document once and remembering
+   * the first port makes authorize() pass and the callback fail.
+   */
+  it("completes the round trip again on a different ephemeral port", async () => {
+    await roundTrip(EPHEMERAL_REDIRECT);
+
+    const callback = await roundTrip("http://localhost:61234/callback");
+    const location = new URL(callback.headers.get("location") as string);
+
+    expect(location.origin).toBe("http://localhost:61234");
+    expect(location.searchParams.get("code")).toBeTruthy();
+  });
+
+  /**
+   * Removing a redirect URI from the document is how a CIMD client revokes it.
+   * That only works if the document is read again rather than frozen into the
+   * registered-client store on first resolve.
+   */
+  it("stops accepting a redirect URI the document no longer declares", async () => {
+    // `no-store` so the resolver's cache does not stand in for the store.
+    served.cacheControl = "no-store";
+
+    await expect(
+      proxy.authorize(buildAuthParams(EPHEMERAL_REDIRECT)),
+    ).resolves.toBeDefined();
+
+    // The loopback callback is withdrawn; the document itself stays valid, so
+    // the rejection has to come from the redirect_uri check.
+    served.document = {
+      ...CIMD_DOCUMENT,
+      redirect_uris: ["http://localhost/other"],
+    };
+
+    await expect(
+      proxy.authorize(buildAuthParams(EPHEMERAL_REDIRECT)),
+    ).rejects.toMatchObject({ code: "invalid_request" });
   });
 });

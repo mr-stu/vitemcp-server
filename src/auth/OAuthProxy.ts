@@ -190,10 +190,7 @@ export class OAuthProxy {
 
     // Two ways to be a known client: a URL-formatted client_id resolved as a
     // Client ID Metadata Document, or a proxy-issued id from DCR.
-    const registeredClient = await this.resolveClient(
-      params.client_id,
-      params.redirect_uri,
-    );
+    const registeredClient = await this.resolveClient(params.client_id);
     const registeredUris = registeredClient.redirectUris;
 
     // RFC 6749 §3.1.2.3 / RFC 6819 §4.1.5 - the redirect_uri MUST be one
@@ -285,10 +282,7 @@ export class OAuthProxy {
     // RFC 6749 §5.2 - reject unknown clients. Only proxy-issued client_ids
     // (obtained via DCR) and, when enabled, resolved CIMD clients are
     // accepted, so stolen codes cannot be exchanged by arbitrary callers.
-    const registeredClient = await this.resolveClient(request.client_id);
-    if (!registeredClient) {
-      throw new OAuthProxyError("invalid_client", "Unknown client_id");
-    }
+    await this.resolveClient(request.client_id);
 
     // Consume the code atomically: whoever takes it owns this exchange, so two
     // concurrent requests — on this instance or another one sharing the
@@ -479,7 +473,7 @@ export class OAuthProxy {
     // Defense-in-depth: the transaction's stored callback URL must still be
     // registered. Guards against any code path that could persist an
     // unvalidated URI, and against registration being revoked mid-flow.
-    if (!(await this.stateStore.isTransactionCallbackRegistered(transaction))) {
+    if (!(await this.isTransactionCallbackRegistered(transaction))) {
       throw new OAuthProxyError(
         "invalid_request",
         "Transaction callback URL is not registered",
@@ -557,9 +551,7 @@ export class OAuthProxy {
       // User denied consent
       await this.stateStore.deleteTransaction(transactionId);
       // Defense-in-depth: never redirect to an unregistered URI.
-      if (
-        !(await this.stateStore.isTransactionCallbackRegistered(transaction))
-      ) {
+      if (!(await this.isTransactionCallbackRegistered(transaction))) {
         throw new OAuthProxyError(
           "invalid_request",
           "Transaction callback URL is not registered",
@@ -1380,6 +1372,33 @@ export class OAuthProxy {
   }
 
   /**
+   * Whether the callback URL a transaction carries is still one its client
+   * declares.
+   *
+   * Resolved through `resolveClient` rather than a raw store lookup so a CIMD
+   * client is visible here too, and so a document that has since dropped the
+   * URI stops matching — the mid-flow revocation this check exists for.
+   * Loopback ports are matched per RFC 8252 §7.3, exactly as `authorize()`
+   * matched them, so the two legs cannot disagree about the same URI.
+   */
+  private async isTransactionCallbackRegistered(
+    transaction: OAuthTransaction,
+  ): Promise<boolean> {
+    let client: ProxyDCRClient;
+
+    try {
+      client = await this.resolveClient(transaction.clientId);
+    } catch {
+      // An unknown or no-longer-resolvable client is not a registered one.
+      return false;
+    }
+
+    return client.redirectUris.some((uri) =>
+      loopbackRedirectMatches(uri, transaction.clientCallbackUrl),
+    );
+  }
+
+  /**
    * Match a parsed URI against an allow-list pattern, one URI component at a
    * time: scheme, host, port, then everything from the path onwards. A `*`
    * therefore stops where its component stops.
@@ -1609,16 +1628,13 @@ export class OAuthProxy {
   }
 
   /**
-   * Redirect URIs the given client is allowed to use.
+   * The client behind a client_id, on whichever leg of the flow asks.
    *
    * A URL-formatted client_id is resolved as a Client ID Metadata Document
    * (the preferred mechanism on this revision); anything else must have been
-   * registered through DCR.
+   * registered through DCR. Throws `invalid_client` when it is neither.
    */
-  private async resolveClient(
-    clientId: string,
-    requestedRedirectUri?: string,
-  ): Promise<ProxyDCRClient> {
+  private async resolveClient(clientId: string): Promise<ProxyDCRClient> {
     // A proxy-issued id from DCR is authoritative: it was registered here.
     const registered =
       await this.stateStore.getRegisteredClientByClientId(clientId);
@@ -1656,28 +1672,14 @@ export class OAuthProxy {
         }
       }
 
-      // Record the resolved client so every later leg of this flow — the token
-      // exchange above all, which carries no redirect_uri to resolve against —
-      // finds it by the same lookup a DCR client uses. CIMD is a public-client
-      // mechanism secured by PKCE, so there is no secret to store.
-      const resolvedUris = [...metadata.redirect_uris];
-
-      // RFC 8252 §7.3: a loopback declaration that omits the port matches the
-      // ephemeral port the client actually bound. Record the concrete URI so
-      // the token exchange, which compares the code's redirect_uri exactly,
-      // still binds to the URI the authorization request carried.
-      if (
-        requestedRedirectUri &&
-        !resolvedUris.includes(requestedRedirectUri) &&
-        resolvedUris.some((uri) =>
-          loopbackRedirectMatches(uri, requestedRedirectUri),
-        )
-      ) {
-        resolvedUris.push(requestedRedirectUri);
-      }
-
-      const cimdClient: ProxyDCRClient = {
-        callbackUrl: resolvedUris[0],
+      // Returned, never persisted. Writing the document into the registered
+      // client store would freeze it: the DCR lookup above runs first, so the
+      // document would never be read again, and `saveRegisteredClient` takes
+      // no TTL. Removing a redirect URI from the document is how a CIMD client
+      // revokes it, and that has to keep working. The resolver already caches
+      // for as long as the document's own Cache-Control allows.
+      return {
+        callbackUrl: metadata.redirect_uris[0],
         clientId,
         clientSecret: undefined,
         metadata: {
@@ -1685,14 +1687,9 @@ export class OAuthProxy {
           client_uri: metadata.client_uri,
           redirect_uris: metadata.redirect_uris,
         } as ProxyDCRClient["metadata"],
-        redirectUris: resolvedUris,
+        redirectUris: metadata.redirect_uris,
         registeredAt: new Date(),
       };
-
-      this.stateStore.cacheRegisteredClient(cimdClient);
-      await this.stateStore.saveRegisteredClient(cimdClient);
-
-      return cimdClient;
     }
 
     // RFC 6749 §5.2 - reject unknown clients with invalid_client. MCP clients

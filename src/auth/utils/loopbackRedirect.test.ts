@@ -43,7 +43,10 @@ describe("loopbackRedirectMatches", () => {
       ["a scheme change", "https://localhost:52430/callback"],
       ["userinfo", "http://user:pw@localhost:52430/callback"],
       ["a different host", "http://evil.test:52430/callback"],
-      ["a host that merely contains the name", "http://localhost.evil.test:52430/callback"],
+      [
+        "a host that merely contains the name",
+        "http://localhost.evil.test:52430/callback",
+      ],
       ["a different loopback host", "http://127.0.0.1:52430/callback"],
       ["a deeper path", "http://localhost:52430/callback/extra"],
       ["a sibling path prefix", "http://localhost:52430/callbackevil"],
